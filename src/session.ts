@@ -1,6 +1,6 @@
 import { Sandbox, type SandboxOpts } from 'e2b'
 import { checkTools, mkdir } from './ops.ts'
-import { clone } from './git.ts'
+import { clone, createSessionBranch } from './git.ts'
 
 export const ENTRY_TYPE = 'pi-e2b-session'
 
@@ -11,6 +11,7 @@ export interface SessionRecord {
   cwd: string
   home: string
   owned: boolean
+  branch?: string
   killed?: boolean
 }
 
@@ -54,8 +55,9 @@ export class Sessions {
     if (previous && previous.sessionId === sessionId) {
       // A missing or inaccessible sandbox is never silently replaced with an empty one.
       const sandbox = await this.provider.connect(previous.sandboxId, connection)
-      this.active = { sandbox, record: previous, persisted }
-      return previous
+      const record = previous.branch ? previous : { ...previous, branch: await createSessionBranch(sandbox, previous.cwd, sessionId) }
+      this.active = { sandbox, record, persisted }
+      return record
     }
 
     let sandbox: Sandbox | undefined
@@ -91,7 +93,8 @@ export class Sessions {
         else await mkdir(sandbox, cwd)
       }
       await checkTools(sandbox, cwd)
-      const record: SessionRecord = { version: 1, sessionId, sandboxId: sandbox.sandboxId, home, cwd, owned }
+      const branch = await createSessionBranch(sandbox, cwd, sessionId)
+      const record: SessionRecord = { version: 1, sessionId, sandboxId: sandbox.sandboxId, home, cwd, owned, branch }
       this.active = { sandbox, record, persisted }
       return record
     } catch (error) {
@@ -140,7 +143,8 @@ export function latestRecord(entries: readonly unknown[]): SessionRecord | undef
     const data = e.data
     if (data?.version !== 1 || typeof data.sessionId !== 'string' || typeof data.sandboxId !== 'string' ||
       typeof data.cwd !== 'string' || !data.cwd.startsWith('/') || typeof data.home !== 'string' ||
-      !data.home.startsWith('/') || typeof data.owned !== 'boolean') {
+      !data.home.startsWith('/') || typeof data.owned !== 'boolean' ||
+      (data.branch !== undefined && (typeof data.branch !== 'string' || !/^pi\/[a-f0-9]{12}$/.test(data.branch)))) {
       throw new Error('Invalid E2B session record; refusing to attach to an unknown workspace')
     }
     return data as SessionRecord

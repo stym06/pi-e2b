@@ -41,7 +41,7 @@ export function fakeSandbox(id = 'sandbox-1') {
     sandboxId: id, trafficAccessToken: 'private-token',
     commands: { run: async (command: string) => {
       calls.push(command)
-      return { stdout: command === 'printf %s "$HOME"' ? '/home/user' : '', stderr: '', exitCode: 0 }
+      return { stdout: command === 'printf %s "$HOME"' ? '/home/user' : command.includes('remote get-url --push --all origin') ? 'https://github.com/example/project.git\n' : '', stderr: '', exitCode: 0 }
     } },
     files: {
       getInfo: async (path: string) => {

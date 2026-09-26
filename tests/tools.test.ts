@@ -94,7 +94,7 @@ test('agent can explicitly push through the token-backed tool', async () => {
     await h.handlers.get('session_start')!({ reason: 'startup' }, h.ctx)
     const result = await h.tools.get('e2b_git_push')!.execute('id', {}, undefined, undefined, h.ctx)
     assert.equal(result.content[0].type === 'text' && result.content[0].text, 'Push completed.')
-    assert.ok(fake.parent.calls.some(call => call.includes('push origin')))
+    assert.ok(fake.parent.calls.some(call => call.includes(' push ')))
     assert.ok(fake.parent.calls.every(call => !call.includes('private-test-token')))
     assert.ok(!JSON.stringify(h.entries).includes('private-test-token'))
   } finally {
@@ -102,6 +102,51 @@ test('agent can explicitly push through the token-backed tool', async () => {
     else process.env.E2B_API_KEY = oldE2bKey
     if (oldGitToken === undefined) delete process.env.E2B_GIT_TOKEN
     else process.env.E2B_GIT_TOKEN = oldGitToken
+  }
+})
+
+test('resuming a session uses host credentials for both push routes without exposing them to the agent', async () => {
+  const oldKey = process.env.E2B_API_KEY
+  const oldToken = process.env.E2B_GIT_TOKEN
+  process.env.E2B_API_KEY = 'test-key'
+  delete process.env.E2B_GIT_TOKEN
+  try {
+    const original = harness(), fake = fakeProvider()
+    setup(original.pi, fake.provider)
+    await original.handlers.get('session_start')!({}, original.ctx)
+    await assert.rejects(original.tools.get('e2b_git_push')!.execute('id', {}, undefined, undefined, original.ctx), /Git credentials unavailable in the local Pi process/)
+    await original.commands.get('e2b')!.handler('status', original.ctx)
+    assert.match(original.notifications.at(-1)!, /Git authentication: unavailable/)
+    await original.handlers.get('session_shutdown')!({}, original.ctx)
+
+    process.env.E2B_GIT_TOKEN = 'resumed-host-token'
+    const resumed = harness()
+    resumed.entries.push(...original.entries)
+    const pushes: Array<Record<string, string> | undefined> = []
+    const run = fake.parent.sandbox.commands.run.bind(fake.parent.sandbox.commands)
+    fake.parent.sandbox.commands.run = (async (command: string, options: any) => {
+      if (command.includes(' push ')) pushes.push(options?.envs)
+      return run(command, options)
+    }) as typeof fake.parent.sandbox.commands.run
+    setup(resumed.pi, fake.provider)
+    await resumed.handlers.get('session_start')!({}, resumed.ctx)
+    assert.equal(fake.calls.filter(call => call.method === 'create').length, 1)
+    await resumed.tools.get('e2b_git_push')!.execute('id', {}, undefined, undefined, resumed.ctx)
+    await resumed.commands.get('e2b')!.handler('push', resumed.ctx)
+    assert.deepEqual(pushes, [
+      { PI_E2B_GIT_TOKEN: 'resumed-host-token' },
+      { PI_E2B_GIT_TOKEN: 'resumed-host-token' },
+    ])
+    await resumed.commands.get('e2b')!.handler('status', resumed.ctx)
+    assert.match(resumed.notifications.at(-1)!, /Git authentication: configured in local Pi process/)
+    const prompt = await resumed.handlers.get('before_agent_start')!({ systemPrompt: 'Current working directory: /host' }, resumed.ctx)
+    assert.match(prompt.systemPrompt, /intentionally absent from ordinary sandbox shell commands/)
+    assert.doesNotMatch(JSON.stringify([prompt, resumed.entries, resumed.notifications, fake.parent.calls]), /resumed-host-token/)
+  } finally {
+    if (oldKey === undefined) delete process.env.E2B_API_KEY
+    else process.env.E2B_API_KEY = oldKey
+    if (oldToken === undefined) delete process.env.E2B_GIT_TOKEN
+    else process.env.E2B_GIT_TOKEN = oldToken
   }
 })
 

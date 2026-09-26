@@ -25,8 +25,11 @@ export function repoUrl(input: string): string {
   if (ssh) value = `https://${ssh[1]}/${ssh[2]}`
   if (/^[\w.-]+\.[a-z]+\//i.test(value)) value = `https://${value}`
   const url = new URL(value)
+  if (url.protocol === 'ssh:' && url.username === 'git' && !url.password && (!url.port || url.port === '22')) {
+    return `https://${url.host.replace(/:22$/, '')}${url.pathname}`
+  }
   if (url.protocol !== 'https:' || url.username || url.password) {
-    throw new Error('Repository must be an HTTPS URL without embedded credentials (git@host:path is also accepted)')
+    throw new Error('Repository must be an HTTPS URL without embedded credentials, git@host:path, or ssh://git@host/path using the default SSH port')
   }
   return url.toString()
 }

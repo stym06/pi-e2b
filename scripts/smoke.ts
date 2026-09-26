@@ -11,10 +11,12 @@ try {
   assert.deepEqual(result.errors, [])
   assert.equal(result.extensions.length, 1)
   const extension = result.extensions[0]
-  assert.deepEqual([...extension.tools.keys()].sort(), ['bash', 'e2b_git_push', 'edit', 'find', 'grep', 'ls', 'preview_url', 'read', 'write'])
+  assert.deepEqual([...extension.tools.keys()].sort(), ['bash', 'e2b_create_pr', 'e2b_git_push', 'edit', 'find', 'grep', 'ls', 'preview_url', 'read', 'write'])
   assert.ok(extension.flags.has('e2b'))
+  assert.ok(extension.flags.has('repo'))
+  assert.ok(extension.flags.has('e2b-repo'))
   assert.ok(extension.commands.has('e2b'))
   assert.ok(extension.handlers.has('user_bash'))
   assert.ok(extension.handlers.has('session_shutdown'))
-  console.log('Smoke passed: Pi loaded the TypeScript extension, 9 tools, flags, commands, and lifecycle hooks.')
+  console.log('Smoke passed: Pi loaded the TypeScript extension, 10 tools, flags, commands, and lifecycle hooks.')
 } finally { await rm(dir, { recursive: true, force: true }) }

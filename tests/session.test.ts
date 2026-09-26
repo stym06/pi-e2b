@@ -29,6 +29,7 @@ test('resume reconnects and a Pi fork copies into a different sandbox', async ()
   const forkRecord = await fork.start('child-session', true, record)
   assert.equal(forkRecord.sandboxId, 'sandbox-fork')
   assert.equal(forkRecord.cwd, record.cwd)
+  assert.notEqual(forkRecord.branch, record.branch)
   assert.equal(fake.parent.calls.at(-1), 'pause')
 })
 
@@ -89,4 +90,21 @@ test('deleting a saved sandbox works without reconnecting and prevents automatic
   assert.equal(sessions.active, undefined)
   await assert.rejects(sessions.start('session', true, { ...record, killed: true }), /deleted/)
   assert.equal(fake.calls.filter(c => c.method === 'create').length, 1)
+})
+
+
+test('older sessions receive a branch once when resumed', async () => {
+  const fake = fakeProvider()
+  const first = new Sessions(config, fake.provider)
+  const record = await first.start('old-session', true)
+  delete record.branch
+  await first.shutdown()
+  fake.parent.calls.length = 0
+  const resumed = new Sessions(config, fake.provider)
+  const updated = await resumed.start('old-session', true, record)
+  assert.match(updated.branch!, /^pi\/[a-f0-9]{12}$/)
+  assert.equal(fake.parent.calls.filter(call => call.includes('checkout --no-track -b')).length, 1)
+  await resumed.shutdown()
+  await resumed.start('old-session', true, updated)
+  assert.equal(fake.parent.calls.filter(call => call.includes('checkout --no-track -b')).length, 1)
 })
