@@ -10,11 +10,26 @@ Requires Node.js 22+, Pi, and an E2B API key.
 npm install -g @earendil-works/pi-coding-agent
 pi install git:github.com/stym06/pi-e2b
 export E2B_API_KEY="your-e2b-api-key"
+```
+
+## Use a repository
+
+From a local Git checkout, run:
+
+```sh
 cd /path/to/project
 pi --e2b
 ```
 
-By default, Pi clones the current repository's remote branch. Local uncommitted changes are not copied. To choose another repository, use `pi --e2b --repo https://github.com/owner/project.git` (SSH URLs also work). Use `--e2b-no-repo` for an empty workspace.
+Pi clones that checkout's `origin` and current branch into the sandbox. Local uncommitted changes and commits that haven't been pushed are not copied.
+
+To use a different remote repository, run:
+
+```sh
+pi --e2b --repo https://github.com/owner/project.git
+```
+
+`--repo` also accepts SSH URLs such as `git@github.com:owner/project.git`; they are converted to HTTPS for cloning. Add `--e2b-branch <name>` to choose a branch, or use `--e2b-no-repo` for an empty workspace.
 
 For private GitHub repositories, pushes, and pull requests, log in on your host with `gh auth login --hostname github.com`. You can use `E2B_GIT_TOKEN` instead; creating a PR with a fine-grained token also needs **Pull requests: Read and write** permission.
 
