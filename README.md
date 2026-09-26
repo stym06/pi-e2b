@@ -8,9 +8,11 @@ Requires Node.js 22+, Pi, and an E2B API key.
 
 ```sh
 npm install -g @earendil-works/pi-coding-agent
-pi install git:github.com/stym06/pi-e2b
+pi install npm:pi-e2b
 export E2B_API_KEY="your-e2b-api-key"
 ```
+
+To install directly from the latest GitHub `main` instead, run `pi install git:github.com/stym06/pi-e2b`.
 
 ## Use a repository
 
