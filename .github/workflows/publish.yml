@@ -1,0 +1,38 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: vars.NPM_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: pi-e2b-npm-publish
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11
+      - run: sudo apt-get update -qq && sudo apt-get install -y ripgrep
+      - run: npm ci
+      - run: npm run check
+      - name: Select the next npm patch version
+        run: |
+          published_version=$(npm view pi-e2b version)
+          npm pkg set version="$published_version"
+          npm version patch --no-git-tag-version --ignore-scripts
+      - run: npm pack --dry-run
+      - run: npm publish --access public

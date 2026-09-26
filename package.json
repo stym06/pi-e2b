@@ -4,6 +4,7 @@
   "description": "Run Pi's read, edit, write, bash, and grep tools in persistent E2B sandboxes",
   "type": "module",
   "license": "MIT",
+  "publishConfig": { "access": "public" },
   "repository": { "type": "git", "url": "git+https://github.com/stym06/pi-e2b.git" },
   "homepage": "https://github.com/stym06/pi-e2b#readme",
   "bugs": { "url": "https://github.com/stym06/pi-e2b/issues" },
