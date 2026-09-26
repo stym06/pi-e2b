@@ -13,7 +13,7 @@ jobs:
     if: vars.NPM_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     concurrency:
       group: pi-e2b-npm-publish
@@ -36,3 +36,14 @@ jobs:
           npm version patch --no-git-tag-version --ignore-scripts
       - run: npm pack --dry-run
       - run: npm publish --access public
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          gh release create "v$version" \
+            --target "$GITHUB_SHA" \
+            --title "v$version" \
+            --generate-notes \
+            --notes "Published to npm: https://www.npmjs.com/package/pi-e2b/v/$version"

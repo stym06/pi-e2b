@@ -1,6 +1,8 @@
 # Publishing pi-e2b
 
-The [publish workflow](.github/workflows/publish.yml) runs for every push to `main` after the repository variable `NPM_PUBLISH_ENABLED` is set to `true`. It checks the package, increments the latest npm patch version in its checkout, and publishes through npm trusted publishing. The generated version is not committed back to Git. You can also run it manually from GitHub Actions.
+The [publish workflow](.github/workflows/publish.yml) runs for every push to `main` after the repository variable `NPM_PUBLISH_ENABLED` is set to `true`. It checks the package, increments the latest npm patch version in its checkout, and publishes through npm trusted publishing. After publishing succeeds, it creates a GitHub Release and a `v<version>` tag pointing to the exact commit used by that run, with generated release notes and a link to the npm version. The generated package version is not committed back to Git, so the source archive retains the version in the repository. You can also run it manually from GitHub Actions.
+
+Release creation uses the workflow's built-in `GITHUB_TOKEN` with `contents: write`; no extra secret is needed. Packages are hosted on npm, so GitHub's **Packages** section remains empty. Published versions appear in GitHub's **Releases** section.
 
 One-time setup for the package owner:
 
