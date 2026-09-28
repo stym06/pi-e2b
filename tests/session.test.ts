@@ -75,6 +75,36 @@ test('simultaneous tool calls share a reconnect request', async () => {
   assert.equal(fake.calls.filter(c => c.method === 'connect').length, 1)
 })
 
+test('idle pause waits for active sandbox work and reconnects the same workspace', async () => {
+  const fake = fakeProvider()
+  const sessions = new Sessions(config, fake.provider)
+  await sessions.start('session', true)
+  let finish!: () => void
+  const held = new Promise<void>(resolve => { finish = resolve })
+  const operation = sessions.use(async () => { await held })
+  await new Promise(resolve => setImmediate(resolve))
+  const pausing = sessions.pause()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 0)
+  finish()
+  await operation
+  await pausing
+  assert.equal(sessions.isPaused, true)
+  await sessions.use(async () => undefined)
+  assert.equal(sessions.isPaused, false)
+  assert.equal(fake.calls.filter(call => call.method === 'create').length, 1)
+})
+
+test('automatic pause leaves borrowed sandboxes alone but explicit pause still works', async () => {
+  const fake = fakeProvider()
+  const sessions = new Sessions({ ...config, sandboxId: 'sandbox-1' }, fake.provider)
+  await sessions.start('borrowed', true)
+  await sessions.pause()
+  assert.equal(fake.parent.calls.includes('pause'), false)
+  await sessions.pause(true)
+  assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 1)
+})
+
 test('session records validate their shape and honor deletion tombstones', () => {
   assert.equal(latestRecord([]), undefined)
   assert.throws(() => latestRecord([{ type: 'custom', customType: ENTRY_TYPE, data: { version: 0 } }]), /Invalid/)

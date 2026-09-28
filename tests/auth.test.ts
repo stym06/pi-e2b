@@ -45,6 +45,8 @@ test('clone and resumed pushes use gh, refresh credentials, and block other push
     }) as typeof fake.parent.sandbox.commands.run
     setup(h.pi, fake.provider)
     await h.handlers.get('session_start')!({}, h.ctx)
+    assert.deepEqual(transferred, [])
+    await h.commands.get('e2b')!.handler('resume', h.ctx)
     assert.deepEqual(transferred, ['first-gh-token'])
     const firstBranch = (h.entries.at(-1) as any).data.branch
     assert.match(firstBranch, /^pi\/[a-f0-9]{12}$/)

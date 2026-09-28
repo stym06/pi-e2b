@@ -1,7 +1,7 @@
 import {
   createBashToolDefinition, createReadToolDefinition, createWriteToolDefinition,
   createEditToolDefinition, createLsToolDefinition, createFindToolDefinition,
-  createGrepToolDefinition, type ExtensionAPI, type ToolDefinition,
+  createGrepToolDefinition, type ExtensionAPI, type ExtensionContext, type ToolDefinition,
 } from '@earendil-works/pi-coding-agent'
 import { Type, type TSchema } from 'typebox'
 import { bashOps, readOps, writeOps, editOps, lsOps } from './ops.ts'
@@ -18,7 +18,7 @@ export function preview(active: ActiveSession, port: number): string {
   return `${url}${access}\nThe server must listen on 0.0.0.0:${port}.`
 }
 
-export function registerTools(pi: ExtensionAPI, enabled: () => boolean, ensure: () => Promise<ActiveSession>): void {
+export function registerTools(pi: ExtensionAPI, enabled: () => boolean, withActive: <T>(ctx: ExtensionContext, operation: (active: ActiveSession) => Promise<T>) => Promise<T>): void {
   function wrap<P extends TSchema, D, S>(
     local: ToolDefinition<P, D, S>, makeRemote: (active: ActiveSession) => ToolDefinition<P, D, S>,
   ): void {
@@ -27,13 +27,14 @@ export function registerTools(pi: ExtensionAPI, enabled: () => boolean, ensure: 
       async execute(id, params, signal, onUpdate, ctx) {
         if (!enabled()) return local.execute(id, params, signal, onUpdate, ctx)
         if (signal?.aborted) throw new Error('aborted')
-        const active = await ensure()
-        const { cwd, home } = active.record
-        // Pi factories prefer ctx.cwd over their constructor cwd. Resolve ~
-        // before calling them too, so they never expand to the host home.
-        const args = { ...params } as Record<string, unknown>
-        if (typeof args.path === 'string') args.path = remotePath(args.path, cwd, home)
-        return makeRemote(active).execute(id, args as typeof params, signal, onUpdate, { ...ctx, cwd })
+        return withActive(ctx, async active => {
+          const { cwd, home } = active.record
+          // Pi factories prefer ctx.cwd over their constructor cwd. Resolve ~
+          // before calling them too, so they never expand to the host home.
+          const args = { ...params } as Record<string, unknown>
+          if (typeof args.path === 'string') args.path = remotePath(args.path, cwd, home)
+          return makeRemote(active).execute(id, args as typeof params, signal, onUpdate, { ...ctx, cwd })
+        })
       },
     })
   }
@@ -54,8 +55,7 @@ export function registerTools(pi: ExtensionAPI, enabled: () => boolean, ensure: 
       async execute(id, params, signal, onUpdate, ctx) {
         if (!enabled()) return tool.execute(id, params, signal, onUpdate, ctx)
         if (signal?.aborted) throw new Error('aborted')
-        const a = await ensure()
-        return search(a.sandbox, a.record.cwd, a.record.home, tool.name as 'find' | 'grep', params, signal)
+        return withActive(ctx, async a => search(a.sandbox, a.record.cwd, a.record.home, tool.name as 'find' | 'grep', params, signal))
       },
     })
   }
@@ -64,19 +64,18 @@ export function registerTools(pi: ExtensionAPI, enabled: () => boolean, ensure: 
     description: 'Get an E2B sandbox service URL. Bind the server to 0.0.0.0; use --e2b-public for browser-accessible previews.',
     promptSnippet: 'Get a URL for a service running inside the E2B sandbox',
     parameters: Type.Object({ port: Type.Integer({ minimum: 1, maximum: 65535 }) }),
-    async execute(_id, { port }) {
+    async execute(_id, { port }, _signal, _onUpdate, ctx) {
       if (!enabled()) throw new Error('Launch Pi with --e2b to use preview_url')
-      return { content: [{ type: 'text', text: preview(await ensure(), port) }], details: undefined }
+      return withActive(ctx, async active => ({ content: [{ type: 'text' as const, text: preview(active, port) }], details: undefined }))
     },
   })
-  pi.on('user_bash', () => {
+  pi.on('user_bash', (_event, ctx) => {
     if (!enabled()) return
     return {
       operations: {
         async exec(command, _cwd, options) {
           if (options.signal?.aborted) throw new Error('aborted')
-          const a = await ensure()
-          return bashOps(a.sandbox, a.record.cwd).exec(command, a.record.cwd, options)
+          return withActive(ctx, async a => bashOps(a.sandbox, a.record.cwd).exec(command, a.record.cwd, options))
         },
       },
     }

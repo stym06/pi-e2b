@@ -21,6 +21,8 @@ test('repository flags override local detection and clone public HTTPS/SSH URLs 
         h.flags.set(flag, url)
         setup(h.pi, fake.provider)
         await h.handlers.get('session_start')!({}, h.ctx)
+        assert.equal(h.entries.length, 0)
+        await h.commands.get('e2b')!.handler('resume', h.ctx)
         assert.equal(h.entries.length, 1, h.notifications.join('\n'))
         assert.deepEqual(hostCommands, ['gh'])
         const clone = fake.parent.calls.find(command => command.includes(' clone '))!
@@ -39,6 +41,7 @@ test('repository flags override local detection and clone public HTTPS/SSH URLs 
     h.flags.set('e2b-branch', 'dev')
     setup(h.pi, fake.provider)
     await h.handlers.get('session_start')!({}, h.ctx)
+    await h.commands.get('e2b')!.handler('resume', h.ctx)
     assert.ok(fake.parent.calls.some(command => command.includes("clone --branch 'dev'")))
   } finally {
     if (oldKey === undefined) delete process.env.E2B_API_KEY
@@ -59,6 +62,7 @@ test('conflicting repository flags fail before creating a sandbox', async () => 
       h.flags.set(flag, value)
       setup(h.pi, fake.provider)
       await h.handlers.get('session_start')!({}, h.ctx)
+      await h.commands.get('e2b')!.handler('resume', h.ctx)
       assert.equal(fake.calls.length, 0)
       assert.match(h.notifications.at(-1)!, /Choose either|cannot be combined/)
     }

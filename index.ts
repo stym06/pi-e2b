@@ -12,7 +12,7 @@ export default function e2bExtension(pi: ExtensionAPI): void {
 }
 
 /** Provider injection lets the offline tests exercise the actual lifecycle handlers. */
-export function setup(pi: ExtensionAPI, provider?: Provider): void {
+export function setup(pi: ExtensionAPI, provider?: Provider, idleMs = 60_000): void {
   pi.registerFlag('e2b', { description: 'Run Pi tools inside an E2B sandbox', type: 'boolean', default: false })
   pi.registerFlag('e2b-public', { description: 'Allow public access to sandbox preview URLs', type: 'boolean', default: false })
   pi.registerFlag('e2b-no-repo', { description: 'Start with an empty workspace instead of detecting a local repository', type: 'boolean', default: false })
@@ -27,29 +27,95 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
   })) pi.registerFlag(name, { description, type: 'string' })
 
   let sessions: Sessions | undefined
+  let starting: Promise<void> | undefined
+  let knownRecord: import('./src/session.ts').SessionRecord | undefined
+  let stopTerminalInput: (() => void) | undefined
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  let lastTypingAt = Date.now()
+  let lastAgentEndAt = 0
+  let lastTypingResumeAt = 0
+  let agentRunning = false
+  let activeContext: ExtensionContext | undefined
   let failure: string | undefined
   const enabled = () => pi.getFlag('e2b') === true
   const flag = (name: string) => {
     const value = pi.getFlag(name)
     return typeof value === 'string' && value.length ? value : undefined
   }
-  const ensure = async () => {
-    if (!sessions?.active) throw new Error(failure ?? 'E2B sandbox unavailable. Use /e2b resume or /e2b new. No command ran on your host.')
-    return sessions.ensure()
+  const clearIdle = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = undefined }
+  const armIdle = () => {
+    clearIdle()
+    if (!sessions?.active?.record.owned || !lastAgentEndAt || agentRunning || sessions.isPaused) return
+    idleTimer = setTimeout(() => { void pauseIfIdle().catch(error => { failure = `E2B idle pause failed: ${message(error)}`; activeContext?.ui.notify(failure, 'warning') }) }, Math.max(0, Math.max(lastAgentEndAt, lastTypingAt) + idleMs - Date.now()))
+    idleTimer.unref?.()
+  }
+  const pauseIfIdle = async () => {
+    idleTimer = undefined
+    if (!sessions?.active || !lastAgentEndAt || agentRunning || sessions.isPaused) return
+    if (Date.now() - Math.max(lastAgentEndAt, lastTypingAt) < idleMs) {
+      armIdle()
+      return
+    }
+    const idleSince = lastTypingAt
+    await sessions.pause()
+    if (sessions.isPaused && (lastTypingAt !== idleSince || agentRunning)) {
+      const active = await sessions.use(async current => current)
+      if (activeContext) status(activeContext, `e2b · ${active.record.sandboxId} · ${active.record.cwd}`)
+      armIdle()
+      return
+    }
+    const record = sessions.active?.record
+    if (record && sessions.isPaused && activeContext) status(activeContext, `e2b · ${record.sandboxId} · paused`)
+  }
+  const ensureStarted = async (ctx: ExtensionContext) => {
+    if (!sessions?.active) {
+      starting ??= start(ctx).finally(() => { starting = undefined })
+      await starting
+    }
+    if (!sessions?.active) throw new Error(failure ?? 'E2B sandbox unavailable. No command ran on your host.')
+  }
+  const ensure = async (ctx: ExtensionContext) => { await ensureStarted(ctx); return sessions!.use(async active => active) }
+  const withActive = async <T>(ctx: ExtensionContext, operation: (active: Awaited<ReturnType<typeof ensure>>) => Promise<T>): Promise<T> => {
+    await ensureStarted(ctx)
+    try { return await sessions!.use(async active => {
+      status(ctx, `e2b · ${active.record.sandboxId} · ${active.record.cwd}`)
+      return operation(active)
+    }) }
+    finally {
+      if (lastAgentEndAt && Date.now() - Math.max(lastAgentEndAt, lastTypingAt) >= idleMs && !agentRunning) await pauseIfIdle()
+      else armIdle()
+    }
+  }
+  const typing = (ctx: ExtensionContext) => {
+    lastTypingAt = Date.now()
+    armIdle()
+    // Typing only wakes an existing workspace. A new workspace starts on its first remote operation.
+    if (knownRecord && !knownRecord.killed && knownRecord.sessionId === ctx.sessionManager.getSessionId() && (!sessions?.active || sessions.isPaused) && Date.now() - lastTypingResumeAt >= 10_000) {
+      lastTypingResumeAt = Date.now()
+      void ensure(ctx).then(active => status(ctx, `e2b · ${active.record.sandboxId} · ${active.record.cwd}`))
+        .catch(error => { failure = message(error); status(ctx, 'e2b · unavailable'); ctx.ui.notify(failure, 'error') })
+    }
+  }
+  const isTypingInput = (data: string) => {
+    if (data.includes('\x1b[200~')) return true // Bracketed paste may arrive in one chunk or separately.
+    const kitty = /^\x1b\[(\d+)[\d:;]*u$/.exec(data)
+    if (kitty) return Number(kitty[1]) >= 32 && Number(kitty[1]) !== 127
+    return !data.startsWith('\x1b') && /[^\x00-\x1f\x7f]/u.test(data)
   }
   const status = (ctx: ExtensionContext, value?: string) => ctx.ui.setStatus('e2b', value)
-  registerTools(pi, enabled, ensure)
+  registerTools(pi, enabled, withActive)
   const gitAuthStatus = async () => {
     const credentials = await gitCredentials(pi, 'https://github.com')
     return `Git authentication: ${credentials ? credentials.source === 'gh' ? 'available through local gh login (github.com)' : 'configured in local Pi process (E2B_GIT_TOKEN)' : 'unavailable; run gh auth login --hostname github.com on your host, or export E2B_GIT_TOKEN before starting Pi'}`
   }
 
-  async function pushCurrentBranch(): Promise<string> {
-    const active = await ensure()
-    const destination = await pushDestination(active.sandbox, active.record.cwd)
-    const credentials = await gitCredentials(pi, destination)
-    if (!credentials) throw new Error('Git credentials unavailable in the local Pi process. For github.com, run gh auth login --hostname github.com in your host terminal and retry. Otherwise export E2B_GIT_TOKEN on the host, then restart Pi with --e2b --continue. Do not set credentials inside the sandbox.')
-    return push(active.sandbox, active.record.cwd, credentials.token, destination)
+  async function pushCurrentBranch(ctx: ExtensionContext): Promise<string> {
+    return withActive(ctx, async active => {
+      const destination = await pushDestination(active.sandbox, active.record.cwd)
+      const credentials = await gitCredentials(pi, destination)
+      if (!credentials) throw new Error('Git credentials unavailable in the local Pi process. For github.com, run gh auth login --hostname github.com in your host terminal and retry. Otherwise export E2B_GIT_TOKEN on the host, then restart Pi with --e2b --continue. Do not set credentials inside the sandbox.')
+      return push(active.sandbox, active.record.cwd, credentials.token, destination)
+    })
   }
 
   pi.registerTool({
@@ -58,15 +124,14 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
     description: 'Push existing commits on the current sandbox branch to origin. The extension automatically uses host E2B_GIT_TOKEN or the local gh login for github.com; do not check credentials in the sandbox. Only call this after the user explicitly asks to push. This does not commit, force-push, or include uncommitted changes.',
     promptSnippet: 'Push committed sandbox changes when the user explicitly asks',
     parameters: Type.Object({}),
-    async execute() {
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
       if (!enabled()) throw new Error('Launch Pi with --e2b to use e2b_git_push')
-      return { content: [{ type: 'text', text: await pushCurrentBranch() }], details: undefined }
+      return { content: [{ type: 'text', text: await pushCurrentBranch(ctx) }], details: undefined }
     },
   })
 
-  async function openPullRequest(options: PullRequestOptions = {}): Promise<string> {
-    const active = await ensure()
-    return createPullRequest(pi, active.sandbox, active.record.cwd, options)
+  async function openPullRequest(ctx: ExtensionContext, options: PullRequestOptions = {}): Promise<string> {
+    return withActive(ctx, async active => createPullRequest(pi, active.sandbox, active.record.cwd, options))
   }
 
   pi.registerTool({
@@ -80,9 +145,9 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
       body: Type.Optional(Type.String({ description: 'PR description; defaults to the latest commit body' })),
       draft: Type.Optional(Type.Boolean({ description: 'Create a draft PR' })),
     }),
-    async execute(_id, options) {
+    async execute(_id, options, _signal, _onUpdate, ctx) {
       if (!enabled()) throw new Error('Launch Pi with --e2b to use e2b_create_pr')
-      return { content: [{ type: 'text', text: await openPullRequest(options) }], details: undefined }
+      return { content: [{ type: 'text', text: await openPullRequest(ctx, options) }], details: undefined }
     },
   })
 
@@ -130,7 +195,9 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
       sessions = new Sessions(config, provider)
       const record = await sessions.start(ctx.sessionManager.getSessionId(), ctx.sessionManager.getSessionFile() !== undefined, previous)
       pi.appendEntry(ENTRY_TYPE, record)
+      knownRecord = record
       failure = undefined
+      armIdle()
       status(ctx, `e2b · ${record.sandboxId} · ${record.cwd}`)
       ctx.ui.notify(`E2B ready: ${record.sandboxId}\nWorkspace: ${record.cwd}\nSession branch: ${record.branch}`, 'info')
     } catch (error) {
@@ -143,10 +210,41 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
   pi.on('session_start', async (_event, ctx) => {
     if (!enabled()) return
     // Handles both reused extension runtimes and fresh ones during session switches.
+    clearIdle()
+    stopTerminalInput?.()
+    stopTerminalInput = undefined
+    await starting
     if (sessions?.active) await sessions.shutdown()
-    await start(ctx)
+    sessions = undefined
+    knownRecord = undefined
+    failure = undefined
+    agentRunning = false
+    lastAgentEndAt = 0
+    lastTypingResumeAt = 0
+    activeContext = ctx
+    lastTypingAt = Date.now()
+    try { knownRecord = latestRecord(ctx.sessionManager.getEntries()) }
+    catch (error) { failure = `E2B: ${message(error)}`; ctx.ui.notify(failure, 'error') }
+    status(ctx, knownRecord?.killed ? 'e2b · deleted' : knownRecord ? `e2b · ${knownRecord.sandboxId} · paused` : 'e2b · waiting for first tool')
+    if (ctx.hasUI && ctx.ui.onTerminalInput) {
+      stopTerminalInput = ctx.ui.onTerminalInput(data => {
+        if (isTypingInput(data)) typing(ctx)
+        return undefined
+      })
+    }
+  })
+  pi.on('input', (event, ctx) => { if (enabled() && event.source !== 'extension') typing(ctx) })
+  pi.on('agent_start', () => { agentRunning = true; clearIdle() })
+  pi.on('agent_end', async () => {
+    agentRunning = false
+    lastAgentEndAt = Date.now()
+    if (enabled()) armIdle()
   })
   pi.on('session_shutdown', async (_event, ctx) => {
+    clearIdle()
+    stopTerminalInput?.()
+    stopTerminalInput = undefined
+    await starting
     try { await sessions?.shutdown() } catch (error) {
       ctx.ui.notify(`E2B cleanup failed: ${message(error)}. Check the sandbox in your E2B dashboard.`, 'warning')
     }
@@ -155,7 +253,10 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
   pi.on('before_agent_start', async event => {
     if (!enabled()) return
     const active = sessions?.active
-    const where = active ? `Current working directory: ${active.record.cwd} (E2B sandbox ${active.record.sandboxId})` : 'E2B sandbox unavailable. All remote tools are blocked.'
+    const where = active ? `Current working directory: ${active.record.cwd} (E2B sandbox ${active.record.sandboxId})`
+      : knownRecord && !knownRecord.killed ? `Current working directory: ${knownRecord.cwd} (E2B sandbox ${knownRecord.sandboxId}; resumes on demand)`
+      : knownRecord?.killed ? 'E2B sandbox was deleted. Remote tools are blocked until /e2b new.'
+      : 'E2B sandbox starts on the first remote tool call.'
     return {
       systemPrompt: event.systemPrompt.replace(/^Current working directory: .*$/gm, where) +
         `\n\n${where}\nThe built-in bash, read, write, edit, ls, find, and grep tools and user ! commands execute inside E2B. ` +
@@ -175,37 +276,46 @@ export function setup(pi: ExtensionAPI, provider?: Provider): void {
       const [argument] = arguments_
       try {
         if (action === 'resume') {
-          if (!sessions?.active) await start(ctx)
-          else { const a = await ensure(); status(ctx, `e2b · ${a.record.sandboxId} · ${a.record.cwd}`) }
+          const a = await ensure(ctx)
+          armIdle()
+          status(ctx, `e2b · ${a.record.sandboxId} · ${a.record.cwd}`)
         } else if (action === 'new') {
           if (sessions?.active) throw new Error('An E2B sandbox is already attached. Use /e2b kill --yes before replacing it.')
-          const previous = latestRecord(ctx.sessionManager.getEntries())
+          const previous = knownRecord ?? latestRecord(ctx.sessionManager.getEntries())
           if (previous && !previous.killed) throw new Error('This session has an existing sandbox. Use /e2b resume or /e2b kill --yes before replacing it.')
           await start(ctx, true)
         } else if (action === 'kill') {
           if (argument !== '--yes') throw new Error('This permanently deletes the sandbox and all its files. Run /e2b kill --yes to confirm.')
-          const record = sessions?.active?.record ?? latestRecord(ctx.sessionManager.getEntries())
+          const record = sessions?.active?.record ?? knownRecord ?? latestRecord(ctx.sessionManager.getEntries())
           if (!record) throw new Error('No sandbox is associated with this session')
           sessions ??= new Sessions(await options(ctx, true), provider)
           await sessions.kill(record)
-          pi.appendEntry(ENTRY_TYPE, { ...record, killed: true })
+          knownRecord = { ...record, killed: true }
+          pi.appendEntry(ENTRY_TYPE, knownRecord)
+          clearIdle()
           failure = 'The E2B sandbox was deleted. Use /e2b new to create a workspace.'
           status(ctx, 'e2b · deleted')
           ctx.ui.notify('E2B sandbox deleted.', 'info')
         } else if (action === 'pause') {
-          const active = await ensure()
-          await active.sandbox.pause()
+          if (!sessions?.active) { ctx.ui.notify('Sandbox is already paused or has not been created.', 'info'); return }
+          const active = sessions.active
+          await sessions.pause(true)
+          clearIdle()
           status(ctx, `e2b · ${active.record.sandboxId} · paused`)
-          ctx.ui.notify('Sandbox paused. The next tool call or /e2b resume will resume it.', 'info')
+          ctx.ui.notify('Sandbox paused. Typing, the next remote tool call, or /e2b resume will resume it.', 'info')
         } else if (action === 'push') {
-          ctx.ui.notify(await pushCurrentBranch(), 'info')
+          ctx.ui.notify(await pushCurrentBranch(ctx), 'info')
         } else if (action === 'pr') {
-          ctx.ui.notify(await openPullRequest(parsePullRequestArgs(arguments_)), 'info')
+          ctx.ui.notify(await openPullRequest(ctx, parsePullRequestArgs(arguments_)), 'info')
         } else if (action === 'url') {
-          ctx.ui.notify(preview(await ensure(), Number(argument)), 'info')
+          ctx.ui.notify(await withActive(ctx, async active => preview(active, Number(argument))), 'info')
         } else if (action === 'status') {
           const active = sessions?.active
-          if (!active) throw new Error(failure ?? 'No active sandbox')
+          if (!active) {
+            if (failure) throw new Error(failure)
+            ctx.ui.notify(knownRecord && !knownRecord.killed ? `E2B ${knownRecord.sandboxId} · paused\nWorkspace: ${knownRecord.cwd}\nSession branch: ${knownRecord.branch}` : knownRecord?.killed ? 'E2B sandbox was deleted. Use /e2b new.' : 'E2B sandbox has not been created. It starts on the first remote tool call.', 'info')
+            return
+          }
           const info = await active.sandbox.getInfo()
           ctx.ui.notify(`E2B ${info.sandboxId} · ${info.state}\nWorkspace: ${active.record.cwd}\nSession branch: ${active.record.branch}\n${await gitAuthStatus()}\nOn exit: ${active.record.owned ? active.persisted ? 'pause' : 'delete (in-memory Pi session)' : 'leave attached sandbox running'}`, 'info')
         } else throw new Error('Usage: /e2b [status|pause|resume|push|pr [base] [--draft]|url <port>|kill --yes|new]')

@@ -38,8 +38,9 @@ test('actual handlers route edits and tilde paths remotely, and switch sessions'
     await h.handlers.get('session_shutdown')!({ reason: 'fork' }, h.ctx)
     h.setSessionId('forked-session')
     await h.handlers.get('session_start')!({ reason: 'fork' }, h.ctx)
-    assert.equal((h.entries.at(-1) as any).data.sandboxId, 'sandbox-fork')
+    assert.equal((h.entries.at(-1) as any).data.sandboxId, 'sandbox-1')
     await h.tools.get('write')!.execute('id', { path: 'fork.txt', content: 'child only' }, undefined, undefined, h.ctx)
+    assert.equal((h.entries.at(-1) as any).data.sandboxId, 'sandbox-fork')
     assert.equal(fake.child.files.get('/home/user/workspace/fork.txt'), 'child only')
     assert.equal(fake.parent.files.has('/home/user/workspace/fork.txt'), false)
   } finally {
@@ -48,7 +49,141 @@ test('actual handlers route edits and tilde paths remotely, and switch sessions'
   }
 })
 
-test('missing credentials block tools and issue an actionable startup error', async () => {
+test('startup is lazy, idle time begins after the agent response, and typing resumes the sandbox', async () => {
+  const oldKey = process.env.E2B_API_KEY
+  process.env.E2B_API_KEY = 'test-key'
+  try {
+    const h = harness(), fake = fakeProvider()
+    let terminalInput: ((data: string) => void) | undefined
+    ;(h.ctx as any).hasUI = true
+    ;(h.ctx.ui as any).onTerminalInput = (handler: (data: string) => void) => { terminalInput = handler; return () => { terminalInput = undefined } }
+    setup(h.pi, fake.provider, 20)
+    await h.handlers.get('session_start')!({}, h.ctx)
+    assert.equal(fake.calls.length, 0)
+    terminalInput!('h')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(fake.calls.length, 0)
+    await h.handlers.get('agent_start')!({}, h.ctx)
+    await h.tools.get('write')!.execute('id', { path: 'hello.txt', content: 'hello' }, undefined, undefined, h.ctx)
+    assert.equal(fake.calls.filter(call => call.method === 'create').length, 1)
+    await new Promise(resolve => setTimeout(resolve, 35))
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 0)
+    await h.handlers.get('agent_end')!({}, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, 35))
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 1)
+    const connects = fake.calls.filter(call => call.method === 'connect').length
+    terminalInput!('a')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(fake.calls.filter(call => call.method === 'connect').length > connects)
+    assert.equal(fake.calls.filter(call => call.method === 'create').length, 1)
+    await h.handlers.get('session_shutdown')!({}, h.ctx)
+    assert.equal(terminalInput, undefined)
+  } finally {
+    if (oldKey === undefined) delete process.env.E2B_API_KEY
+    else process.env.E2B_API_KEY = oldKey
+  }
+})
+
+test('continuing a saved session stays paused at startup and reconnects on first typed text', async () => {
+  const oldKey = process.env.E2B_API_KEY
+  process.env.E2B_API_KEY = 'test-key'
+  try {
+    const original = harness(), fake = fakeProvider()
+    setup(original.pi, fake.provider)
+    await original.handlers.get('session_start')!({}, original.ctx)
+    await original.tools.get('write')!.execute('id', { path: 'hello.txt', content: 'saved' }, undefined, undefined, original.ctx)
+    await original.handlers.get('session_shutdown')!({}, original.ctx)
+    const resumed = harness()
+    resumed.entries.push(...original.entries)
+    let terminalInput: ((data: string) => void) | undefined
+    ;(resumed.ctx as any).hasUI = true
+    ;(resumed.ctx.ui as any).onTerminalInput = (handler: (data: string) => void) => { terminalInput = handler; return () => {} }
+    setup(resumed.pi, fake.provider)
+    const before = fake.calls.length
+    await resumed.handlers.get('session_start')!({}, resumed.ctx)
+    assert.equal(fake.calls.length, before)
+    terminalInput!('\x1b[104u')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(fake.calls.length > before)
+    assert.equal(fake.calls.filter(call => call.method === 'create').length, 1)
+    await resumed.handlers.get('session_shutdown')!({}, resumed.ctx)
+  } finally {
+    if (oldKey === undefined) delete process.env.E2B_API_KEY
+    else process.env.E2B_API_KEY = oldKey
+  }
+})
+
+test('idle pause waits until the agent run ends', async () => {
+  const oldKey = process.env.E2B_API_KEY
+  process.env.E2B_API_KEY = 'test-key'
+  try {
+    const h = harness(), fake = fakeProvider()
+    setup(h.pi, fake.provider, 20)
+    await h.handlers.get('session_start')!({}, h.ctx)
+    await h.handlers.get('agent_start')!({}, h.ctx)
+    await h.tools.get('write')!.execute('id', { path: 'hello.txt', content: 'hello' }, undefined, undefined, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, 35))
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 0)
+    await h.handlers.get('agent_end')!({}, h.ctx)
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 0)
+    await new Promise(resolve => setTimeout(resolve, 35))
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 1)
+  } finally {
+    if (oldKey === undefined) delete process.env.E2B_API_KEY
+    else process.env.E2B_API_KEY = oldKey
+  }
+})
+
+test('sandbox work without an agent response does not start the idle countdown', async () => {
+  const oldKey = process.env.E2B_API_KEY
+  process.env.E2B_API_KEY = 'test-key'
+  try {
+    const h = harness(), fake = fakeProvider()
+    setup(h.pi, fake.provider, 20)
+    await h.handlers.get('session_start')!({}, h.ctx)
+    await h.tools.get('write')!.execute('id', { path: 'hello.txt', content: 'hello' }, undefined, undefined, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, 35))
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 0)
+    await h.handlers.get('session_shutdown')!({}, h.ctx)
+    assert.equal(fake.parent.calls.filter(call => call === 'pause').length, 1)
+  } finally {
+    if (oldKey === undefined) delete process.env.E2B_API_KEY
+    else process.env.E2B_API_KEY = oldKey
+  }
+})
+
+test('typing during an in-flight idle pause leaves the sandbox resumed', async () => {
+  const oldKey = process.env.E2B_API_KEY
+  process.env.E2B_API_KEY = 'test-key'
+  try {
+    const h = harness(), fake = fakeProvider()
+    let releasePause!: () => void, reportPause!: () => void
+    const pauseStarted = new Promise<void>(resolve => { reportPause = resolve })
+    ;(fake.parent.sandbox as any).pause = async () => {
+      fake.parent.calls.push('pause')
+      reportPause()
+      await new Promise<void>(resolve => { releasePause = resolve })
+      return true
+    }
+    setup(h.pi, fake.provider, 200)
+    await h.handlers.get('session_start')!({}, h.ctx)
+    await h.handlers.get('input')!({ source: 'interactive', text: 'first' }, h.ctx)
+    await h.handlers.get('agent_start')!({}, h.ctx)
+    await h.tools.get('write')!.execute('id', { path: 'hello.txt', content: 'hello' }, undefined, undefined, h.ctx)
+    await h.handlers.get('agent_end')!({}, h.ctx)
+    await Promise.race([pauseStarted, new Promise((_, reject) => setTimeout(() => reject(new Error('idle pause did not begin')), 1000))])
+    const connects = fake.calls.filter(call => call.method === 'connect').length
+    await h.handlers.get('input')!({ source: 'interactive', text: 'next' }, h.ctx)
+    releasePause()
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(fake.calls.filter(call => call.method === 'connect').length > connects)
+  } finally {
+    if (oldKey === undefined) delete process.env.E2B_API_KEY
+    else process.env.E2B_API_KEY = oldKey
+  }
+})
+
+test('missing credentials block tools when the sandbox is first needed', async () => {
   const oldKey = process.env.E2B_API_KEY
   delete process.env.E2B_API_KEY
   try {
@@ -56,8 +191,8 @@ test('missing credentials block tools and issue an actionable startup error', as
     setup(h.pi, fake.provider)
     await h.handlers.get('session_start')!({ reason: 'startup' }, h.ctx)
     assert.equal(fake.calls.length, 0)
-    assert.match(h.notifications.at(-1)!, /E2B_API_KEY/)
     await assert.rejects(h.tools.get('write')!.execute('id', { path: '/host/unsafe', content: 'unsafe' }, undefined, undefined, h.ctx), /E2B_API_KEY/)
+    assert.match(h.notifications.at(-1)!, /E2B_API_KEY/)
   } finally { if (oldKey !== undefined) process.env.E2B_API_KEY = oldKey }
 })
 
@@ -68,6 +203,7 @@ test('kill requires an explicit confirmation and new creates a fresh workspace',
     const h = harness(), fake = fakeProvider()
     setup(h.pi, fake.provider)
     await h.handlers.get('session_start')!({ reason: 'startup' }, h.ctx)
+    await h.commands.get('e2b')!.handler('resume', h.ctx)
     const command = h.commands.get('e2b')!.handler
     await command('kill', h.ctx)
     assert.ok(!fake.calls.some(c => c.method === 'kill'))

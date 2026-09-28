@@ -43,8 +43,14 @@ export interface Provider {
 export class Sessions {
   active?: ActiveSession
   private connecting?: Promise<ActiveSession>
+  private users = 0
+  private idleWaiters: Array<() => void> = []
+  private transition: Promise<void> = Promise.resolve()
+  private paused = false
 
   constructor(readonly options: SessionOptions, private provider: Provider = Sandbox) {}
+
+  get isPaused(): boolean { return this.paused }
 
   async start(sessionId: string, persisted: boolean, previous?: SessionRecord): Promise<SessionRecord> {
     const opts = this.options
@@ -57,6 +63,7 @@ export class Sessions {
       const sandbox = await this.provider.connect(previous.sandboxId, connection)
       const record = previous.branch ? previous : { ...previous, branch: await createSessionBranch(sandbox, previous.cwd, sessionId) }
       this.active = { sandbox, record, persisted }
+      this.paused = false
       return record
     }
 
@@ -96,6 +103,7 @@ export class Sessions {
       const branch = await createSessionBranch(sandbox, cwd, sessionId)
       const record: SessionRecord = { version: 1, sessionId, sandboxId: sandbox.sandboxId, home, cwd, owned, branch }
       this.active = { sandbox, record, persisted }
+      this.paused = false
       return record
     } catch (error) {
       if (sandbox && owned) {
@@ -115,16 +123,46 @@ export class Sessions {
       active.sandbox = await this.provider.connect(active.record.sandboxId, {
         apiKey: this.options.apiKey, timeoutMs: this.options.timeoutMs,
       })
+      this.paused = false
       return active
     })()
     try { return await this.connecting } finally { this.connecting = undefined }
   }
 
+  async use<T>(operation: (active: ActiveSession) => Promise<T>): Promise<T> {
+    this.users++
+    try {
+      await this.transition
+      return await operation(await this.ensure())
+    } finally {
+      if (--this.users === 0) this.idleWaiters.splice(0).forEach(resolve => resolve())
+    }
+  }
+
+  private async waitForIdle(): Promise<void> {
+    while (this.users > 0) await new Promise<void>(resolve => this.idleWaiters.push(resolve))
+    await this.transition
+  }
+
+  async pause(force = false): Promise<void> {
+    await this.waitForIdle()
+    this.transition = this.transition.catch(() => {}).then(async () => {
+      if (this.users || !this.active || (!this.active.record.owned && !force) || this.paused) return
+      await this.active.sandbox.pause()
+      this.paused = true
+    })
+    await this.transition
+  }
+
   async shutdown(): Promise<void> {
+    await this.waitForIdle()
     const active = this.active
     this.active = undefined
     if (!active || !active.record.owned) return
-    if (active.persisted) await active.sandbox.pause()
+    if (active.persisted) {
+      if (!this.paused) await active.sandbox.pause()
+      this.paused = true
+    }
     else await active.sandbox.kill()
   }
 

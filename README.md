@@ -23,7 +23,7 @@ cd /path/to/project
 pi --e2b
 ```
 
-Pi clones that checkout's `origin` and current branch into the sandbox. Local uncommitted changes and commits that haven't been pushed are not copied.
+Pi starts the sandbox when a remote tool first needs it, then clones that checkout's `origin` and current branch. Local uncommitted changes and commits that haven't been pushed are not copied.
 
 To use a different remote repository, run:
 
@@ -48,4 +48,4 @@ For private GitHub repositories, pushes, and pull requests, log in on your host 
 | `/e2b kill --yes` | Permanently delete the sandbox |
 | `/e2b new` | Create a new sandbox after deletion |
 
-Commit changes before pushing or creating a PR. Saved sessions pause on exit and remain paused until resumed or deleted. Resume with `pi --e2b --continue`.
+Commit changes before pushing or creating a PR. An owned sandbox pauses one minute after the agent finishes responding, or one minute after your last typing if you type afterward. Time spent on the agent's run does not count toward that minute. In interactive Pi, typing resumes an existing paused sandbox; the first remote tool also resumes it if needed. Saved sessions pause on exit and reconnect without creating a replacement when continued with `pi --e2b --continue`. In-memory Pi sessions are deleted on exit because they cannot be continued.
